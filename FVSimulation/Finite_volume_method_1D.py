@@ -44,7 +44,7 @@ def CN_eqs(dt,dx,D,R,Q0,Q_prev,Q_next):
 def CN_step(dt,dx,D,R,Q0,Q_prev):
   return fsolve(lambda Q_next : CN_eqs(dt,dx,D,R,Q0,Q_prev,Q_next), Q_prev)
 
-def simulate(Q_start,steps,dt,dx,D,R,Q0,method='BackwardEuler'):
+def simulate(Q_start,steps,dt,dx,D,R,Q0,method='CrankNicolson'):
   if method == 'RK4':
     step = RK4_step
   elif method == 'ForwardEuler':
@@ -62,6 +62,17 @@ def simulate(Q_start,steps,dt,dx,D,R,Q0,method='BackwardEuler'):
     Q_list[i+1,:]=step(dt,dx,D,R,Q0,Q_list[i,:])
   
   t_list = np.arange(0,dt*(steps+1),dt)
+
   return t_list, Q_list
 
-def
+def nqp_to_Nqp(Q_list,x_centers):
+  return np.trapz(Q_list,x_centers,axis=1)
+
+def Nqp_to_theta(Nqp,dthetadN,Q,f0,t_axis):
+  theta = Nqp*dthetadN
+  tau_r = Q/(np.pi*f0)
+  lenT = len(Nqp)
+  Qpadded = np.pad(Nqp,(lenT,lenT),constant_values=(0,0))
+  Ringing = np.pad(np.exp(-t_axis/tau_r),(lenT,lenT),constant_values=(0,0))
+  return np.convolve(Qpadded,Ringing,'same')[lenT,2*lenT]
+                   
