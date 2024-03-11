@@ -60,4 +60,8 @@ def simulate(Q_start,steps,dt,dx,D,R,Q0,method='BackwardEuler'):
   Q_list[0,:]=Q_start
   for i in tqdm(range(steps)):
     Q_list[i+1,:]=step(dt,dx,D,R,Q0,Q_list[i,:])
-  return Q_list
+  
+  t_list = np.arange(0,dt*(steps+1),dt)
+  return t_list, Q_list
+
+def
