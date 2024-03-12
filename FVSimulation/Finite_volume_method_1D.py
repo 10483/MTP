@@ -71,8 +71,8 @@ def nqp_to_Nqp(Q_list,x_centers):
 def Nqp_to_theta(Nqp,dthetadN,Q,f0,t_axis):
   theta = Nqp*dthetadN
   tau_r = Q/(np.pi*f0)
-  lenT = len(Nqp)
-  Qpadded = np.pad(Nqp,(lenT,lenT),constant_values=(0,0))
-  Ringing = np.pad(np.exp(-t_axis/tau_r),(lenT,lenT),constant_values=(0,0))
-  return np.convolve(Qpadded,Ringing,'same')[lenT,2*lenT]
+  lenT = len(theta)
+  thetapadded = np.pad(theta,(lenT,lenT),constant_values=(0,0))
+  Ringing = np.exp(-t_axis/tau_r)
+  return np.trim_zeros(np.convolve(thetapadded,Ringing,'valid'))
                    
