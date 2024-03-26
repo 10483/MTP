@@ -96,7 +96,7 @@ class KID_data:
       plt.show()
 
 class KID_sim():
-  def __init__(self,KID,dt,dx,simtime_approx=100,method='CrankNicolson',ring=True):
+  def __init__(self,KID,dt,dx,simtime_approx=100,method='CrankNicolson',ring=True,gaussianIC=True,useSymmetry=True):
     if method == 'RK4':
       self.step = self.RK4_step
     elif method == 'ForwardEuler':
@@ -114,17 +114,30 @@ class KID_sim():
     self.t_axis = np.arange(0,dt*(self.steps+0.5),dt)
     self.simtime = self.t_axis[-1]
     self.ring=ring
+    self.gaussianIC=gaussianIC
+    self.useSymmetry = useSymmetry
 
     self.simulate(KID)
 
   def set_geometry(self,length,D):
-    self.x_borders=np.arange(-length/2,length/2+self.dx,self.dx)
-    self.x_centers=np.arange(-length/2+self.dx/2,length/2+self.dx/2,self.dx)
+    if self.useSymmetry:
+      self.x_borders=np.arange(0,length/2+self.dx/2,self.dx)
+      self.x_centers=np.arange(self.dx/2,length/2+self.dx/2,self.dx)
+    else:
+      self.x_borders=np.arange(-length/2,length/2+self.dx/2,self.dx)
+      self.x_centers=np.arange(-length/2+self.dx/2,length/2+self.dx/2,self.dx)
     self.D=np.ones_like(self.x_borders)*D
 
   def set_IC(self,sigma_IC,dNqp_init):
-    self.IC=np.exp(-0.5*(self.x_centers/sigma_IC)**2)*dNqp_init/(sigma_IC*np.sqrt(2*np.pi))
-  
+    if self.gaussianIC:
+      self.IC=np.exp(-0.5*(self.x_centers/sigma_IC)**2)*dNqp_init/(sigma_IC*np.sqrt(2*np.pi)) 
+    else:
+      self.IC=np.zeros_like(self.x_centers)
+      if self.useSymmetry:
+        self.IC[0]=dNqp_init/2/self.dx
+      else:
+        self.IC[int(round(len(self.x_centers)/2))]=dNqp_init/self.dx
+
   def diffuse(self,Q_prev):
     Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
     gradient = self.D*np.diff(Q_temp)/self.dx
@@ -184,7 +197,10 @@ class KID_sim():
     self.amp=KID.dAdN*self.signal
 
   def nqp_to_Nqp(self):
-    self.timeseriesNqp = np.trapz(self.timeseriesQ,self.x_centers,axis=1)
+    if self.useSymmetry:
+      self.timeseriesNqp = np.trapz(self.timeseriesQ,self.x_centers,axis=1)*2
+    else:
+      self.timeseriesNqp = np.trapz(self.timeseriesQ,self.x_centers,axis=1)
 
   def ringing(self,tau_ringing):
     lenT = len(self.t_axis)
