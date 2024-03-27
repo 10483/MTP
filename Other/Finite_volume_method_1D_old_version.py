@@ -97,95 +97,83 @@ class KID_data:
 
 class KID_sim():
   def __init__(self,KID,dt,dx,simtime_approx=100,method='CrankNicolson',ring=True,gaussianIC=True,useSymmetry=True,adaptivedx=True):
-    
-    #settings
     if method == 'BackwardEuler':
       self.step = self.backwardeuler_step
     elif method == 'CrankNicolson':
       self.step = self.CN_step
     else:
       raise ValueError('Invalid option')
+    
+    self.dt=dt
+    self.dx=dx
+    self.steps = int(np.round(simtime_approx/dt))
+    self.t_axis = np.arange(0,dt*(self.steps+0.5),dt)
+    self.simtime = self.t_axis[-1]
     self.ring = ring
     self.gaussianIC = gaussianIC
     self.useSymmetry = useSymmetry
     self.adaptivedx = adaptivedx
 
-    tsteps = int(np.round(simtime_approx/dt))
-    self.t_axis = np.arange(0,dt*(tsteps+0.5),dt)
+    self.simulate(KID)
 
-    _ , x_centers = self.set_geometry(dx,KID.length)
-    self.timeseriesQ = [self.set_IC(dx,x_centers,KID.sigma_IC,KID.dNqp_init)]
-    dx_list=[dx]
-    t_elapsed=KID.sigma_IC**2/(2*KID.D)
+  def set_geometry(self,length,D):
+    if self.useSymmetry:
+      self.x_borders=np.arange(0,length/2+self.dx/2,self.dx)
+      self.x_centers=np.arange(self.dx/2,length/2,self.dx)
+    else:
+      self.x_borders=np.arange(-length/2,length/2+self.dx/2,self.dx)
+      self.x_centers=np.arange(-length/2+self.dx/2,length/2,self.dx)
+    self.D=np.ones_like(self.x_borders)*D
 
-    for i in tqdm(range(tsteps)):
-      if self.adaptivedx and (i!=0):
-        sqrtMSD = np.sqrt(2*KID.D*t_elapsed)
-        dx = np.min([sqrtMSD/4,KID.length/4])
-        _ , x_centers = self.set_geometry(dx,KID.length)
-        Qprev = np.interp(x_centers,x_centersprev,self.timeseriesQ[i])
-        Qprev *= self.nqp_to_Nqp(self.timeseriesQ[i],dx_list[i])/self.nqp_to_Nqp(Qprev,dx)
+  def set_IC(self,sigma_IC,dNqp_init):
+    if self.gaussianIC:
+      self.IC=np.exp(-0.5*(self.x_centers/sigma_IC)**2)*dNqp_init/(sigma_IC*np.sqrt(2*np.pi)) 
+    else:
+      self.IC=np.zeros_like(self.x_centers)
+      if self.useSymmetry:
+        self.IC[0]=dNqp_init/2/self.dx
       else:
-        Qprev = self.timeseriesQ[i]
-      t_elapsed+=dt
-      dx_list.append(dx)
-      self.timeseriesQ.append(self.step(dt,dx,KID.D,KID.Rprime,KID.nqp_thermal,Qprev))
-      x_centersprev = x_centers
-    
-    self.timeseriesNqp = np.array([self.nqp_to_Nqp(Q,dx) for Q,dx in zip(self.timeseriesQ,dx_list)])
+        self.IC[int(round(len(self.x_centers)/2))]=dNqp_init/self.dx
 
-    if self.ring:
+  def diffuse(self,Q_prev):
+    Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
+    gradient = self.D*np.diff(Q_temp)/self.dx
+    return (-gradient[:-1]+gradient[1:])/self.dx
+
+  def backwardeuler_eqs(self,Rprime,Q0,Q_prev,Q_next):
+    return Q_prev - Q_next + self.dt*(self.diffuse(Q_next) - Rprime*Q_next**2 - 2*Rprime*Q0*Q_next)
+
+  def backwardeuler_step(self,Rprime,Q0,Q_prev):
+    return fsolve(lambda Q_next : self.backwardeuler_eqs(Rprime,Q0,Q_prev,Q_next), Q_prev)
+
+  def CN_eqs(self,Rprime,Q0,Q_prev,Q_next):
+    return Q_prev - Q_next + 0.5*self.dt*(self.diffuse(Q_next) - Rprime*Q_next**2 - 2*Rprime*Q0*Q_next +
+                                          self.diffuse(Q_prev) - Rprime*Q_prev**2 - 2*Rprime*Q0*Q_prev)
+
+  def CN_step(self,Rprime,Q0,Q_prev):
+    return fsolve(lambda Q_next : self.CN_eqs(Rprime,Q0,Q_prev,Q_next), Q_prev)
+
+  def simulate(self,KID):
+    self.set_geometry(KID.length,KID.D)
+    self.set_IC(KID.sigma_IC,KID.dNqp_init)
+    self.timeseriesQ = np.zeros((self.steps+1,len(self.IC)))
+    self.timeseriesQ[0,:]=self.IC
+    for i in tqdm(range(self.steps)):
+      self.timeseriesQ[i+1,:]=self.step(KID.Rprime,KID.nqp_thermal,self.timeseriesQ[i,:])
+    
+    self.nqp_to_Nqp()
+    if self.ring==True:
       self.signal = self.ringing(KID.tau_ringing)
     else:
       self.signal = self.timeseriesNqp
     self.phase=KID.dthetadN*self.signal
     self.amp=KID.dAdN*self.signal
 
-  def set_geometry(self,dx,length):
+  def nqp_to_Nqp(self):
     if self.useSymmetry:
-      x_borders=np.arange(0,length/2+dx/2,dx)
-      x_centers=np.arange(dx/2,length/2,dx)
+      self.timeseriesNqp = np.trapz(self.timeseriesQ,self.x_centers,axis=1)*2
     else:
-      x_borders=np.arange(-length/2,length/2+dx/2,dx)
-      x_centers=np.arange(-length/2+dx/2,length/2,dx)
-    return x_borders,x_centers
-
-  def set_IC(self,dx,x_centers,sigma_IC,dNqp_init):
-    if self.gaussianIC:
-      IC = np.exp(-0.5*(x_centers/sigma_IC)**2)*dNqp_init/(sigma_IC*np.sqrt(2*np.pi)) 
-    else:
-      IC = np.zeros_like(x_centers)
-      if self.useSymmetry:
-        IC[0] = dNqp_init/2/dx
-      else:
-        middle_index = int(np.floor(len(x_centers)/2))
-        IC[middle_index-1:middle_index+1] = dNqp_init/2/dx
-    return IC
-
-  def diffuse(self,dx,D,Q_prev):
-    Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
-    gradient = D*np.diff(Q_temp)/dx
-    return (-gradient[:-1]+gradient[1:])/dx
-
-  def backwardeuler_eqs(self,dt,dx,D,Rprime,Q0,Q_prev,Q_next):
-    return Q_prev - Q_next + dt*(self.diffuse(dx,D,Q_next) - Rprime*Q_next**2 - 2*Rprime*Q0*Q_next)
-
-  def backwardeuler_step(self,dt,dx,D,Rprime,Q0,Q_prev):
-    return fsolve(lambda Q_next : self.backwardeuler_eqs(dt,dx,D,Rprime,Q0,Q_prev,Q_next), Q_prev)
-
-  def CN_eqs(self,dt,dx,D,Rprime,Q0,Q_prev,Q_next):
-    return Q_prev - Q_next + 0.5*dt*(self.diffuse(dx,D,Q_next) - Rprime*Q_next**2 - 2*Rprime*Q0*Q_next +
-                                     self.diffuse(dx,D,Q_prev) - Rprime*Q_prev**2 - 2*Rprime*Q0*Q_prev)
-
-  def CN_step(self,dt,dx,D,Rprime,Q0,Q_prev):
-    return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,Rprime,Q0,Q_prev,Q_next), Q_prev)
-
-  def nqp_to_Nqp(self,Q,dx):
-    if self.useSymmetry:
-      Nqp = np.trapz(Q,dx=dx)*2
-    else:
-      Nqp = np.trapz(Q,dx=dx)
-    return Nqp
+      self.timeseriesNqp = np.trapz(self.timeseriesQ,self.x_centers,axis=1)
 
   def ringing(self,tau_ringing):
     lenT = len(self.t_axis)
@@ -198,6 +186,7 @@ class sim_data_comp:
   def __init__(self,KID,SIM):
     self.t_full=KID.t_full
     self.t_sim=SIM.t_axis
+    self.dt=SIM.dt
     self.phasedata = KID.phase
     self.ampdata = KID.amp
     self.phasesim = SIM.phase
