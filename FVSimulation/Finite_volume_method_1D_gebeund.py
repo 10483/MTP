@@ -148,8 +148,8 @@ class KID_sim():
     self.timeseriesNqp = self.nqp_to_Nqp(self.timeseriesQ,dxlist)
 
   def set_geometry(self,dx,length):
-    x_borders=np.arange(-length/2,length/2+dx/2,dx)
-    x_centers=np.arange(-length/2+dx/2,length/2,dx)
+    x_borders=np.arange(0,length/2+dx/2,dx)
+    x_centers=np.arange(dx/2,length/2,dx)
     return x_borders,x_centers
   def diffuse(self,dx,D,Q_prev):
     Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
@@ -166,7 +166,7 @@ class KID_sim():
     return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,Rprime,Q0,Q_prev,Q_next), Q_prev)
 
   def nqp_to_Nqp(self,Q,dx):
-    Nqp = np.sum(Q,axis=-1)*dx
+    Nqp = np.sum(Q,axis=-1)*dx*2
     return Nqp
 
 class sim_data_comp:
