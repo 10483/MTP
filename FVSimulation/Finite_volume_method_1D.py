@@ -74,7 +74,7 @@ class KID_data:
     TdepT=self.Tdepdata[:,1]
     argT = np.abs(TdepT-self.temp).argmin()
     self.Quality=self.Tdepdata[argT,2]
-    self.F0=self.Tdepdata[argT,5]*1e-6 #convert to /us 
+    self.F0=self.Tdepdata[argT,5]*1e-6 #convert to /us from Hz
     self.T_c=self.Tdepdata[argT,21]
     self.volume = self.Tdepdata[argT,14]
     self.height = self.Tdepdata[argT,25]
@@ -100,7 +100,7 @@ class KID_data:
       plt.show()
 
 class KID_sim():
-  def __init__(self,KID,dt,dx_or_fraction,simtime_approx=100,method='CrankNicolson',adaptivedx=True):
+  def __init__(self,KID,dt,dx_or_fraction,simtime_approx=100,method='CrankNicolson',adaptivedx=True,usesymmetry=True):
     
     #settings
     if method == 'BackwardEuler': #more stable
@@ -111,6 +111,7 @@ class KID_sim():
       raise ValueError('Invalid option')
     
     self.adaptivedx = adaptivedx #Increase the courseness of the grid according to the expected width of the distribution. => also sets dx = KID.sigma_IC*dx_or_fraction
+    self.usesymmetry = usesymmetry #Simulate only half the domain
 
     tsteps = int(np.round(simtime_approx/dt))
     self.t_axis = np.arange(0,dt*(tsteps+0.5),dt)
@@ -120,8 +121,12 @@ class KID_sim():
     else:
       dx = dx_or_fraction
     
-    maxdiv = int(np.ceil(KID.length/dx))
-    valid_dx_list = KID.length/np.arange(1,maxdiv+0.5)[::-1]
+    if self.usesymmetry:
+      maxdiv = int(np.ceil(KID.length/2/dx))
+      valid_dx_list = KID.length/2/np.arange(1,maxdiv+0.5)[::-1]
+    else:
+      maxdiv = int(np.ceil(KID.length/dx))
+      valid_dx_list = KID.length/np.arange(1,maxdiv+0.5)[::-1]
     dx = valid_dx_list[0]
 
     _ , x_centers = self.set_geometry(dx,KID.length)
@@ -148,8 +153,14 @@ class KID_sim():
     self.timeseriesNqp = self.nqp_to_Nqp(self.timeseriesQ,dxlist)
 
   def set_geometry(self,dx,length):
-    x_borders=np.arange(-length/2,length/2+dx/2,dx)
-    x_centers=np.arange(-length/2+dx/2,length/2,dx)
+    #x_borders=np.arange(-length/2,length/2+dx/2,dx)
+    #x_centers=np.arange(-length/2+dx/2,length/2,dx)
+    if self.usesymmetry:
+      x_borders=np.arange(0,length/2+dx/2,dx)
+      x_centers=np.arange(dx/2,length/2,dx)
+    else:
+      x_borders=np.arange(-length/2,length/2+dx/2,dx)
+      x_centers=np.arange(-length/2+dx/2,length/2,dx)
     return x_borders,x_centers
   def diffuse(self,dx,D,Q_prev):
     Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
@@ -166,7 +177,10 @@ class KID_sim():
     return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,Rprime,Q0,Q_prev,Q_next), Q_prev)
 
   def nqp_to_Nqp(self,Q,dx):
-    Nqp = np.sum(Q,axis=-1)*dx
+    if self.usesymmetry:
+      Nqp = np.sum(Q,axis=-1)*dx*2
+    else:
+      Nqp = np.sum(Q,axis=-1)*dx
     return Nqp
 
 class sim_data_comp:
