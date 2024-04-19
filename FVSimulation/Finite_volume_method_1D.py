@@ -140,7 +140,7 @@ class KID_sim():
     for i in tqdm(range(tsteps)):
       if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]):
         sqrtMSD = np.sqrt(2*KID.D*dt*i)+KID.sigma_IC
-        dx = valid_dx_list[valid_dx_list < sqrtMSD*dx_or_fraction][-1]
+        dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
         Qprev = np.interp(x_centers,x_centersprev,self.timeseriesQ[i,:lengthlist[i]])
         Qprev *= self.nqp_to_Nqp(self.timeseriesQ[i],dxlist[i])/self.nqp_to_Nqp(Qprev,dx)
       else:
