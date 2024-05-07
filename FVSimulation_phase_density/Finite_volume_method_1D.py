@@ -33,11 +33,13 @@ class KID_data:
     else:
       self.getresdata_FFT()
     
+    '''
     #deconvolve
     self.ringing = np.exp(-self.t_full/self.tau_ringing)
     self.ringing /= np.sum(self.ringing)
     self.phase, _ = deconvolve(np.pad(self.phase,(0,len(self.t_full)-1),constant_values=0),self.ringing)
     self.amp, _ = deconvolve(np.pad(self.amp,(0,len(self.t_full)-1),constant_values=0),self.ringing)
+    '''
 
   def getpulsedata(self):
     self.datapath = self.chippath+str(self.lambda_ph_in_nm)+'nm/'+self.filename
@@ -86,7 +88,9 @@ class KID_data:
   def fit_tail(self,start=0,end=-1,showplots=True):
     self.phasefit = self.phase[start:end]
     self.t_fit = self.t_full[start:end]
-    self.fitpars,self.fitcov=np.polyfit(self.t_fit,np.log(self.phasefit),1,cov=True)
+    phasefit = self.phasefit[self.phasefit>0]
+    t_fit = self.t_fit[self.phasefit>0]
+    self.fitpars,self.fitcov=np.polyfit(t_fit,np.log(phasefit),1,cov=True)
     a=np.exp(self.fitpars[1])
     b=self.fitpars[0]
     b_std=np.sqrt(np.diag(self.fitcov)[0])
@@ -100,16 +104,17 @@ class KID_data:
       plt.show()
 
 class KID_sim():
-  def __init__(self,KID,D,K,dt,dx_or_fraction,L=False,sigma_IC=0.5,start_offset=0,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True):
+  def __init__(self,KID,D,K,phi_init,dt,dx_or_fraction,L=False,sigma_IC=0.5,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True):
     
+    self.phi_init = phi_init
     self.D = D
     self.K = K
     if L == False:
       self.L = KID.L
     else:
       self.L = L
+    
 
-    sigma_IC+=np.sqrt(2*D*start_offset)
 
     #settings
     if method == 'BackwardEuler': #more stable
@@ -127,8 +132,6 @@ class KID_sim():
     self.t_axis = np.arange(0,dt*(tsteps+0.5),dt)
 
     indmax = np.argmax(KID.phase)
-    self.start_offset = start_offset
-    self.phi_init = KID.phase[indmax+self.start_offset]
 
     if self.adaptivedx: 
       dx = sigma_IC*dx_or_fraction
@@ -167,7 +170,9 @@ class KID_sim():
       x_centersprev = x_centers
     
     self.dxlist = dxlist
-    self.timeseriestheta = self.integrate(self.timeseriesphi,dxlist)
+    self.timeseriestheta_raw = self.integrate(self.timeseriesphi,dxlist)
+    self.timeseriestheta = self.ringing(KID.tau_ringing)
+    self.peakshift = self.t_axis[np.argmax(self.timeseriestheta_raw)] - self.t_axis[np.argmax(self.timeseriestheta)]
 
   def set_geometry(self,dx,length):
     #x_borders=np.arange(-length/2,length/2+dx/2,dx)
@@ -199,6 +204,13 @@ class KID_sim():
     else:
       Nqp = np.sum(Q,axis=-1)*dx
     return Nqp
+  
+  def ringing(self,tau_ringing):
+    lenT = len(self.t_axis)
+    padded = np.pad(self.timeseriestheta_raw,(lenT,lenT),constant_values=(0,0))
+    convring = np.exp(-self.t_axis/tau_ringing)
+    convring /= np.sum(convring)
+    return np.convolve(padded,convring,'valid')[:lenT]
 
 class sim_data_comp:
   def __init__(self,KID,SIM):
