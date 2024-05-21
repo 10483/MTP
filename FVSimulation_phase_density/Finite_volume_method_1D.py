@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import fsolve
+from scipy.special import lambertw
 from scipy.signal import deconvolve
 from tqdm import tqdm
 import matplotlib.pyplot as plt
@@ -7,10 +8,26 @@ import os
 import re
 
 # everything in um, us, K and eV  and combinations of them unless stated differently
+class fixed_values:
+  def __init__(self):
+    self.h=4.135667e-9 #eV us
+    self.hbar=self.h/(2*np.pi) #eV us rad-1
+    self.c=299792458 #um/us
+    self.k_B=8.617343e-5 #eV/K
+    self.eta_pb_max=0.59
+    self.energy_au=27.211386 #eV
+    self.time_au=2.418884e-11 #us
+    self.length_au=5.291772e-5 #um
+    self.N0_bTa = 30.3e9 #eV-1 um-3
+    self.D0_bTa = 50 #um2 us-1
+    self.N0_Al = 17.2e9 #eV-1 um-3
+    self.D0_Al = 15000 #um2 us-1
+    # self.alpha_k = 0.77????
+consts = fixed_values()
 
 #gather data from specific KID necessary for simulation and data comparison.
 class KID_data:
-  def __init__(self,chippath,lambda_ph_in_nm,filename,length,samplefreq_in_MHz=1,FFT_power_path=False):
+  def __init__(self,chippath,lambda_ph_in_nm,filename,length,samplefreq_in_MHz=1,FFT_power_path=False,material='bTa'):
     #copy stuff
     self.filename = filename
     self.samplefreq_in_MHz = samplefreq_in_MHz
@@ -25,6 +42,14 @@ class KID_data:
     self.temp_in_mK = nums[2]
     self.temp = self.temp_in_mK/1000
     self.length = length
+    if material == 'bTa':
+      self.N0 = consts.N0_bTa
+      self.D0 = consts.D0_bTa
+    elif material == 'Al':
+      self.N0 = consts.N0_Al
+      self.D0 = consts.D0_Al
+    else:
+      raise ValueError()
     #get pulse data
     self.getpulsedata()
     #get resonator data
@@ -74,6 +99,7 @@ class KID_data:
     self.dthetadN=self.Tdepdata[argT,10]
     self.dAdN=self.Tdepdata[argT,18]
     self.tau_ringing=self.Quality/(np.pi*self.F0)
+    self.Delta = 1.768*consts.k_B*self.T_c
   
   def getresdata_FFT(self):
     path_to_data = self.chippath+self.FFT_power_path+'KID'+str(self.KIDno)+'_0dBm__all_td_averaged.dat'
@@ -104,18 +130,25 @@ class KID_data:
       plt.show()
 
 class KID_sim():
-  def __init__(self,KID,D,K,phi_init,dt,dx_or_fraction,L=False,sigma_IC=0.5,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True):
-    
+  def __init__(self,KID,Teff_thermal,K,phi_init,dt,dx_or_fraction,D0=False,dthetadN=False,L=False,sigma_IC=0.5,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True):
+    # copy variables and process settings
     self.phi_init = phi_init
-    self.D = D
+    self.D0 = D0
     self.K = K
+    self.Teff_thermal = Teff_thermal
+    if dthetadN == False:
+      self.dthetadN = KID.dthetadN
+    else:
+      self.dthetadN = dthetadN
+    if D0 == False:
+      self.D0 = KID.D0
+    else:
+      self.D0 = D0
     if L == False:
       self.L = KID.L
     else:
       self.L = L
     
-
-
     #settings
     if method == 'BackwardEuler': #more stable
       self.step = self.backwardeuler_step
@@ -126,18 +159,16 @@ class KID_sim():
     
     self.adaptivedx = adaptivedx #Increase the courseness of the grid according to the expected width of the distribution. => also sets dx = sigma_IC*dx_or_fraction
     self.usesymmetry = usesymmetry #Simulate only half the domain
-    self.adaptivedt = True # from initial phase to phase/10, ramp up dt from start value to 1
+    self.adaptivedt = adaptivedt # from initial phase to phase/10, ramp up dt from start value to 1 (Not yet implemented)
 
     tsteps = int(np.round(simtime_approx/dt))
     self.t_axis = np.arange(0,dt*(tsteps+0.5),dt)
 
-    indmax = np.argmax(KID.phase)
-
+    # based on settings, decide on geometry.
     if self.adaptivedx: 
       dx = sigma_IC*dx_or_fraction
     else:
       dx = dx_or_fraction
-    
     if self.usesymmetry:
       maxdiv = int(np.ceil(KID.length/2/dx))
       valid_dx_list = KID.length/2/np.arange(1,maxdiv+0.5)[::-1]
@@ -145,25 +176,41 @@ class KID_sim():
       maxdiv = int(np.ceil(KID.length/dx))
       valid_dx_list = KID.length/np.arange(1,maxdiv+0.5)[::-1]
     dx = valid_dx_list[0]
+    x_borders , x_centers = self.set_geometry(dx,KID.length)
 
-    _ , x_centers = self.set_geometry(dx,KID.length)
+    # initialize output arrays
     self.timeseriesphi = np.zeros((tsteps+1,len(x_centers)))
     self.timeseriesphi[0] = np.exp(-0.5*(x_centers/sigma_IC)**2)*self.phi_init/(sigma_IC*np.sqrt(2*np.pi)) #IC
     self.timeseriesphi[0]=self.timeseriesphi[0]*self.phi_init/self.integrate(self.timeseriesphi[0],dx)
-
+    # initialize arrays necessary for integrating the phase density
     lengthlist = np.zeros(tsteps+1,dtype=int)
     lengthlist[0] = len(x_centers)
     dxlist = np.zeros(tsteps+1)
     dxlist[0] = dx
 
+    # calc thermal density of quasiparticles
+    self.Q0 = self.T_to_nqp(Teff_thermal,KID.N0,KID.Delta,KID.height)
+    Dfinal = D0*np.sqrt(2*consts.k_B*Teff_thermal/(np.pi*KID.Delta))
+
+    # run simulation
     for i in tqdm(range(tsteps)):
+
+      # handle adaptive dx
       if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]):
-        sqrtMSD = np.sqrt(2*D*dt*i)+sigma_IC
+        sqrtMSD = np.sqrt(2*Dfinal*dt*i)+sigma_IC
         dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
+        x_borders, x_centers = self.set_geometry(dx,KID.length)
         Qprev = np.interp(x_centers,x_centersprev,self.timeseriesphi[i,:lengthlist[i]])
         Qprev *= self.integrate(self.timeseriesphi[i],dxlist[i])/self.integrate(Qprev,dx)
       else:
         Qprev = self.timeseriesphi[i,:lengthlist[i]]
+
+      # update diffusion
+      dnqp = Qprev/self.dthetadN
+      Teff_x = self.nqp_to_T(dnqp+self.Q0,KID.N0,KID.Delta,KID.height)
+      D = self.calc_D(self.D0,Teff_x,KID.Delta,x_borders,x_centers)
+
+      # do simulation step
       lengthlist[i+1]=len(x_centers)
       dxlist[i+1]=dx
       self.timeseriesphi[i+1,:lengthlist[i+1]] = self.step(dt,dx,D,self.L,K,Qprev)
@@ -172,11 +219,9 @@ class KID_sim():
     self.dxlist = dxlist
     self.timeseriestheta_raw = self.integrate(self.timeseriesphi,dxlist)
     self.timeseriestheta = self.ringing(KID.tau_ringing)
-    self.peakshift = self.t_axis[np.argmax(self.timeseriestheta_raw)] - self.t_axis[np.argmax(self.timeseriestheta)]
+    self.t_axis -= self.t_axis[np.argmax(self.timeseriestheta)]
 
   def set_geometry(self,dx,length):
-    #x_borders=np.arange(-length/2,length/2+dx/2,dx)
-    #x_centers=np.arange(-length/2+dx/2,length/2,dx)
     if self.usesymmetry:
       x_borders=np.arange(0,length/2+dx/2,dx)
       x_centers=np.arange(dx/2,length/2,dx)
@@ -184,6 +229,19 @@ class KID_sim():
       x_borders=np.arange(-length/2,length/2+dx/2,dx)
       x_centers=np.arange(-length/2+dx/2,length/2,dx)
     return x_borders,x_centers
+  
+  def T_to_nqp(self,Teff,N0,Delta,height):
+    return 2*N0*np.sqrt(2*np.pi*consts.k_B*Teff*Delta)*np.exp(-Delta/(consts.k_B*Teff))*height
+
+  def nqp_to_T(self,nqp,N0,Delta,height):
+    a = 2*N0*height*np.sqrt(2*np.pi*consts.k_B*Delta)
+    b = Delta/consts.k_B
+    return np.real(2*b/lambertw(2*a**2*b/(nqp**2)))
+
+  
+  def calc_D(self,D0,Teff_x,Delta,x_borders,x_centers):
+    return np.interp(x_borders,x_centers,D0*np.sqrt(2*consts.k_B*Teff_x/(np.pi*Delta)))
+  
   def diffuse(self,dx,D,Q_prev):
     Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
     gradient = D*np.diff(Q_temp)/dx
@@ -211,12 +269,3 @@ class KID_sim():
     convring = np.exp(-self.t_axis/tau_ringing)
     convring /= np.sum(convring)
     return np.convolve(padded,convring,'valid')[:lenT]
-
-class sim_data_comp:
-  def __init__(self,KID,SIM):
-    self.t_full=KID.t_full
-    self.t_sim=SIM.t_axis
-    self.phase_data = KID.phase
-    self.phase_sim = SIM.timeseriestheta
-    self.tstart = self.t_full[np.argmax(self.phase_data)]+KID.dt*SIM.start_offset
-    self.t_sim_aligned = self.t_sim + self.tstart
