@@ -22,7 +22,6 @@ class fixed_values:
     self.D0_bTa = 50 #um2 us-1
     self.N0_Al = 17.2e9 #eV-1 um-3
     self.D0_Al = 15000 #um2 us-1
-    # self.alpha_k = 0.77????
 consts = fixed_values()
 
 #gather data from specific KID necessary for simulation and data comparison.
@@ -130,24 +129,16 @@ class KID_data:
       plt.show()
 
 class KID_sim():
-  def __init__(self,KID,Teff_thermal,K,phi_init,dt,dx_or_fraction,D0=False,dthetadN=False,L=False,sigma_IC=0.5,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True):
+  def __init__(self,KID,Teff_thermal,K,phi_init,dt,dx_or_fraction,sigma_IC=0.5,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False):
     # copy variables and process settings
     self.phi_init = phi_init
-    self.D0 = D0
     self.K = K
     self.Teff_thermal = Teff_thermal
-    if dthetadN == False:
-      self.dthetadN = KID.dthetadN
-    else:
-      self.dthetadN = dthetadN
-    if D0 == False:
-      self.D0 = KID.D0
-    else:
-      self.D0 = D0
-    if L == False:
-      self.L = KID.L
-    else:
-      self.L = L
+
+    self.tau_ringing = KID.tau_ringing
+    self.dthetadN = KID.dthetadN
+    self.D0 = KID.D0
+    self.L = KID.L
     
     #settings
     if method == 'BackwardEuler': #more stable
@@ -190,7 +181,7 @@ class KID_sim():
 
     # calc thermal density of quasiparticles
     self.Q0 = self.T_to_nqp(Teff_thermal,KID.N0,KID.Delta,KID.height)
-    Dfinal = D0*np.sqrt(2*consts.k_B*Teff_thermal/(np.pi*KID.Delta))
+    Dfinal = self.D0*np.sqrt(2*consts.k_B*Teff_thermal/(np.pi*KID.Delta))
 
     # run simulation
     for i in tqdm(range(tsteps)):
@@ -206,9 +197,12 @@ class KID_sim():
         Qprev = self.timeseriesphi[i,:lengthlist[i]]
 
       # update diffusion
-      dnqp = Qprev/self.dthetadN
-      Teff_x = self.nqp_to_T(dnqp+self.Q0,KID.N0,KID.Delta,KID.height)
-      D = self.calc_D(self.D0,Teff_x,KID.Delta,x_borders,x_centers)
+      if D_const:
+        D=Dfinal
+      else:
+        dnqp = Qprev/self.dthetadN
+        Teff_x = self.nqp_to_T(dnqp+self.Q0,KID.N0,KID.Delta,KID.height)
+        D = self.calc_D(self.D0,Teff_x,KID.Delta,x_borders,x_centers)
 
       # do simulation step
       lengthlist[i+1]=len(x_centers)
@@ -218,7 +212,7 @@ class KID_sim():
     
     self.dxlist = dxlist
     self.timeseriestheta_raw = self.integrate(self.timeseriesphi,dxlist)
-    self.timeseriestheta = self.ringing(KID.tau_ringing)
+    self.timeseriestheta = self.ringing(self.tau_ringing)
     self.t_axis -= self.t_axis[np.argmax(self.timeseriestheta)]
 
   def set_geometry(self,dx,length):
