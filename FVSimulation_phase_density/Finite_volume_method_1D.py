@@ -128,92 +128,146 @@ class KID_data:
       plt.semilogy(a*np.exp(-self.t_fit/self.tauqpstar))
       plt.show()
 
-class KID_sim():
-  def __init__(self,KID,Teff_thermal,K,phi_init,dt,dx_or_fraction,sigma_IC=0.5,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False):
-    # copy variables and process settings
-    self.phi_init = phi_init
-    self.K = K
-    self.Teff_thermal = Teff_thermal
-
-    self.tau_ringing = KID.tau_ringing
-    self.dthetadN = KID.dthetadN
-    self.D0 = KID.D0
-    self.L = KID.L
+class KID_params():
+  def __init__(self,eta_pb,sigma_IC,Teff=False,Q0=False,KID=False,lambda_ph=False,tau_ringing=False,dthetadN=False,N0=False,D0=False,L=False,Delta=False,length=False,height=False,width=False):
+    # Copy data from KID. If optional param is given, overwrite KID value with individually specified value.
+    if KID == False:
+      print('Warning! No KID data given. Make sure to check whether all optional parameters are provided, otherwise garbage may be produced in the simulation.')
     
-    #settings
+    self.eta_pb = eta_pb
+    self.sigma_IC = sigma_IC
+    self.lambda_ph = lambda_ph if (KID==False) or (lambda_ph!=False) else KID.lambda_ph
+    self.tau_ringing = tau_ringing if (KID==False) or (tau_ringing!=False) else KID.tau_ringing
+    self.dthetadN = dthetadN if (KID==False) or (dthetadN!=False) else KID.dthetadN
+    self.N0 = N0 if (KID==False) or (N0!=False) else KID.N0
+    self.D0 = D0 if (KID==False) or (D0!=False) else KID.D0
+    self.L = L if (KID==False) or (L!=False) else KID.L
+    self.Delta = Delta if (KID==False) or (Delta!=False) else KID.Delta
+    self.length = length if (KID==False) or (length!=False) else KID.length
+    self.height = height if (KID==False) or (height!=False) else KID.height
+    self.width = width if (KID==False) or (width!=False) else KID.width
+
+    if (Teff==False) and (Q0==False):
+      raise ValueError('Either Teff or Q0 should be specified.')
+    self.Q0 = Q0 if (Q0!=False) else self.T_to_nqp(Teff,)
+
+  def T_to_nqp(self,Teff):
+    return 2*self.N0*np.sqrt(2*np.pi*consts.k_B*Teff*self.Delta)*np.exp(-self.Delta/(consts.k_B*Teff))*self.height*self.width
+
+class KID_sim():
+  def __init__(self,params,dt_init,dx_or_fraction,dt_max=1,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False,dt_interp=0.01):
+    #copy physical parameters from params object
+    self.lambda_ph = params.lambda_ph
+    self.sigma_IC = params.sigma_IC
+    self.eta_pb = params.eta_pb #fit
+    self.Q0 = params.Q0 #fit
+    self.tau_ringing = params.tau_ringing
+    self.dthetadN = params.dthetadN #fit
+    self.N0 = params.N0
+    self.D0 = params.D0
+    self.L = params.L
+    self.Delta = params.Delta
+    self.length = params.length
+    self.height = params.height
+    self.width = params.width
+
+    self.K = self.L/(2*self.Q0)
+    
+    self.E_ph = consts.h*consts.c/self.lambda_ph
+    self.Nqp_init = self.eta_pb*self.E_ph/self.Delta
+
+    #simulation settings
     if method == 'BackwardEuler': #more stable
       self.step = self.backwardeuler_step
     elif method == 'CrankNicolson': #more accurate
       self.step = self.CN_step
     else:
       raise ValueError('Invalid option')
-    
     self.adaptivedx = adaptivedx #Increase the courseness of the grid according to the expected width of the distribution. => also sets dx = sigma_IC*dx_or_fraction
-    self.usesymmetry = usesymmetry #Simulate only half the domain
-    self.adaptivedt = adaptivedt # from initial phase to phase/10, ramp up dt from start value to 1 (Not yet implemented)
+    self.usesymmetry = usesymmetry #Simulates only half the domain, efficient for a symmetrical situation
+    self.adaptivedt = adaptivedt #Keeps the product of dt and DN constant at each step, such that for smaller expected changes in N (in the tail of the decay), larger timesteps are used.
 
-    tsteps = int(np.round(simtime_approx/dt))
-    self.t_axis = np.arange(0,dt*(tsteps+0.5),dt)
+    dt = dt_init
+    self.t_axis=[0]
+    self.dtlist=[dt_init]
 
     # based on settings, decide on geometry.
     if self.adaptivedx: 
-      dx = sigma_IC*dx_or_fraction
+      dx = self.sigma_IC*dx_or_fraction
     else:
       dx = dx_or_fraction
     if self.usesymmetry:
-      maxdiv = int(np.ceil(KID.length/2/dx))
-      valid_dx_list = KID.length/2/np.arange(1,maxdiv+0.5)[::-1]
+      maxdiv = int(np.ceil(self.length/2/dx))
+      valid_dx_list = self.length/2/np.arange(1,maxdiv+0.5)[::-1]
     else:
-      maxdiv = int(np.ceil(KID.length/dx))
-      valid_dx_list = KID.length/np.arange(1,maxdiv+0.5)[::-1]
+      maxdiv = int(np.ceil(self.length/dx))
+      valid_dx_list = self.length/np.arange(1,maxdiv+0.5)[::-1]
     dx = valid_dx_list[0]
-    x_borders , x_centers = self.set_geometry(dx,KID.length)
+    x_borders , x_centers = self.set_geometry(dx,self.length)
 
     # initialize output arrays
-    self.timeseriesphi = np.zeros((tsteps+1,len(x_centers)))
-    self.timeseriesphi[0] = np.exp(-0.5*(x_centers/sigma_IC)**2)*self.phi_init/(sigma_IC*np.sqrt(2*np.pi)) #IC
-    self.timeseriesphi[0]=self.timeseriesphi[0]*self.phi_init/self.integrate(self.timeseriesphi[0],dx)
-    # initialize arrays necessary for integrating the phase density
-    lengthlist = np.zeros(tsteps+1,dtype=int)
-    lengthlist[0] = len(x_centers)
-    dxlist = np.zeros(tsteps+1)
-    dxlist[0] = dx
+    self.Qintime = [np.exp(-0.5*(x_centers/self.sigma_IC)**2)*self.Nqp_init/(self.sigma_IC*np.sqrt(2*np.pi))] # IC
+    self.Qintime[0] = self.Qintime[0]*self.Nqp_init/self.integrate(self.Qintime[0],dx)
+    self.Nqpintime = [self.integrate(self.Qintime[0],dx)]
+    self.dxlist = [dx]
 
     # calc thermal density of quasiparticles
-    self.Q0 = self.T_to_nqp(Teff_thermal,KID.N0,KID.Delta,KID.height)
-    Dfinal = self.D0*np.sqrt(2*consts.k_B*Teff_thermal/(np.pi*KID.Delta))
+    Teff_thermal = self.nqp_to_T(self.Q0,self.N0,self.Delta,self.height,self.width)
+    Dfinal = self.D0*np.sqrt(2*consts.k_B*Teff_thermal/(np.pi*self.Delta))
 
     # run simulation
-    for i in tqdm(range(tsteps)):
+    i=0
+    t_elapsed=0
 
-      # handle adaptive dx
-      if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]):
-        sqrtMSD = np.sqrt(2*Dfinal*dt*i)+sigma_IC
-        dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
-        x_borders, x_centers = self.set_geometry(dx,KID.length)
-        Qprev = np.interp(x_centers,x_centersprev,self.timeseriesphi[i,:lengthlist[i]])
-        Qprev *= self.integrate(self.timeseriesphi[i],dxlist[i])/self.integrate(Qprev,dx)
-      else:
-        Qprev = self.timeseriesphi[i,:lengthlist[i]]
+    with tqdm(total=simtime_approx+2, bar_format='{l_bar}{bar}| time (us): {n_fmt}') as pbar:
+      while True: # do-while loop
+        # handle adaptive dx
+        if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]):
+          sqrtMSD = np.sqrt(2*Dfinal*t_elapsed)+self.sigma_IC
+          dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
+          x_borders, x_centers = self.set_geometry(dx,self.length)
+          Qprev = np.interp(x_centers,x_centersprev,self.Qintime[i])
+          Qprev *= self.integrate(self.Qintime[i],self.dxlist[i])/self.integrate(Qprev,dx)
+        else:
+          Qprev = self.Qintime[i]
 
-      # update diffusion
-      if D_const:
-        D=Dfinal
-      else:
-        dnqp = Qprev/self.dthetadN
-        Teff_x = self.nqp_to_T(dnqp+self.Q0,KID.N0,KID.Delta,KID.height)
-        D = self.calc_D(self.D0,Teff_x,KID.Delta,x_borders,x_centers)
+        # update diffusion
+        if D_const:
+          D=Dfinal
+        else:
+          Teff_x = self.nqp_to_T(Qprev+self.Q0,self.N0,self.Delta,self.height,self.width)
+          D = self.calc_D(self.D0,Teff_x,self.Delta,x_borders,x_centers)
 
-      # do simulation step
-      lengthlist[i+1]=len(x_centers)
-      dxlist[i+1]=dx
-      self.timeseriesphi[i+1,:lengthlist[i+1]] = self.step(dt,dx,D,self.L,K,Qprev)
-      x_centersprev = x_centers
-    
-    self.dxlist = dxlist
-    self.timeseriestheta_raw = self.integrate(self.timeseriesphi,dxlist)
-    self.timeseriestheta = self.ringing(self.tau_ringing)
-    self.t_axis -= self.t_axis[np.argmax(self.timeseriestheta)]
+        # do simulation step
+        self.dxlist.append(dx)
+        self.dtlist.append(dt)
+        self.Qintime.append(self.step(dt,dx,D,self.L,self.K,Qprev))
+        self.Nqpintime.append(self.integrate(self.Qintime[i+1],dx))
+
+        pbar.update(dt)
+        x_centersprev = x_centers
+        t_elapsed+=dt
+        self.t_axis.append(t_elapsed)
+        if t_elapsed>simtime_approx:
+          break
+
+        # handle adaptive dt
+        if self.adaptivedt and (dt<=dt_max):
+          dN = self.Nqpintime[i]-self.Nqpintime[i+1]
+          if i==0:
+            dNdt = dN*dt
+          if dN != 0:
+            dt = dNdt/dN
+        i+=1
+
+    self.t_axis = np.array(self.t_axis)
+    self.Nqpintime=np.array(self.Nqpintime)
+
+    self.t_axis_interp = np.arange(0,self.t_axis[-1],dt_interp)
+    Nqp_interp = np.interp(self.t_axis_interp,self.t_axis,self.Nqpintime)
+    self.phaseintime = self.ringing(self.t_axis_interp,Nqp_interp*self.dthetadN,self.tau_ringing)
+    self.t_start = -self.t_axis_interp[np.argmax(self.phaseintime)]
+    self.t_axis_interp += self.t_start
 
   def set_geometry(self,dx,length):
     if self.usesymmetry:
@@ -223,15 +277,11 @@ class KID_sim():
       x_borders=np.arange(-length/2,length/2+dx/2,dx)
       x_centers=np.arange(-length/2+dx/2,length/2,dx)
     return x_borders,x_centers
-  
-  def T_to_nqp(self,Teff,N0,Delta,height):
-    return 2*N0*np.sqrt(2*np.pi*consts.k_B*Teff*Delta)*np.exp(-Delta/(consts.k_B*Teff))*height
 
-  def nqp_to_T(self,nqp,N0,Delta,height):
-    a = 2*N0*height*np.sqrt(2*np.pi*consts.k_B*Delta)
+  def nqp_to_T(self,nqp,N0,Delta,height,width):
+    a = 2*N0*height*width*np.sqrt(2*np.pi*consts.k_B*Delta)
     b = Delta/consts.k_B
     return np.real(2*b/lambertw(2*a**2*b/(nqp**2)))
-
   
   def calc_D(self,D0,Teff_x,Delta,x_borders,x_centers):
     return np.interp(x_borders,x_centers,D0*np.sqrt(2*consts.k_B*Teff_x/(np.pi*Delta)))
@@ -240,13 +290,17 @@ class KID_sim():
     Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use e.g. np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0))
     gradient = D*np.diff(Q_temp)/dx
     return (-gradient[:-1]+gradient[1:])/dx
+  
   def backwardeuler_eqs(self,dt,dx,D,L,K,Q_prev,Q_next):
     return Q_prev - Q_next + dt*(self.diffuse(dx,D,Q_next) - K*Q_next**2 - L*Q_next)
+  
   def backwardeuler_step(self,dt,dx,D,L,K,Q_prev):
     return fsolve(lambda Q_next : self.backwardeuler_eqs(dt,dx,D,L,K,Q_prev,Q_next), Q_prev)
+  
   def CN_eqs(self,dt,dx,D,L,K,Q_prev,Q_next):
     return Q_prev - Q_next + 0.5*dt*(self.diffuse(dx,D,Q_next) - K*Q_next**2 - L*Q_next +
                                      self.diffuse(dx,D,Q_prev) - K*Q_prev**2 - L*Q_prev)
+  
   def CN_step(self,dt,dx,D,L,K,Q_prev):
     return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,L,K,Q_prev,Q_next), Q_prev)
 
@@ -257,9 +311,9 @@ class KID_sim():
       Nqp = np.sum(Q,axis=-1)*dx
     return Nqp
   
-  def ringing(self,tau_ringing):
-    lenT = len(self.t_axis)
-    padded = np.pad(self.timeseriestheta_raw,(lenT,lenT),constant_values=(0,0))
-    convring = np.exp(-self.t_axis/tau_ringing)
+  def ringing(self,t_axis,phaseintime,tau_ringing):
+    lenT = len(t_axis)
+    padded = np.pad(phaseintime,(lenT,lenT),constant_values=(0,0))
+    convring = np.exp(-t_axis/tau_ringing)
     convring /= np.sum(convring)
     return np.convolve(padded,convring,'valid')[:lenT]
