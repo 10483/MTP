@@ -132,7 +132,7 @@ class KID_params():
   def __init__(self,eta_pb,sigma_IC,Teff=False,Q0=False,KID=False,lambda_ph=False,tau_ringing=False,dthetadN=False,N0=False,D0=False,L=False,Delta=False,length=False,height=False,width=False):
     # Copy data from KID. If optional param is given, overwrite KID value with individually specified value.
     if KID == False:
-      print('Warning! No KID data given. Make sure to check whether all optional parameters are provided, otherwise garbage may be produced in the simulation.')
+      print('Warning! No KID data given. Make sure to check whether all other optional parameters are provided, otherwise garbage may be produced in the simulation.')
     
     self.eta_pb = eta_pb
     self.sigma_IC = sigma_IC
@@ -149,13 +149,27 @@ class KID_params():
 
     if (Teff==False) and (Q0==False):
       raise ValueError('Either Teff or Q0 should be specified.')
-    self.Q0 = Q0 if (Q0!=False) else self.T_to_nqp(Teff,)
+    self.Q0 = Q0 if (Q0!=False) else self.T_to_nqp(Teff)
 
   def T_to_nqp(self,Teff):
     return 2*self.N0*np.sqrt(2*np.pi*consts.k_B*Teff*self.Delta)*np.exp(-self.Delta/(consts.k_B*Teff))*self.height*self.width
+  
+  def print(self):
+    print('eta_pb: \t',self.eta_pb)
+    print('sigma_IC: \t',self.sigma_IC)
+    print('Q0: \t\t', self.Q0)
+    print('lambda_ph: \t',self.lambda_ph)
+    print('tau_ringing: \t',self.tau_ringing)
+    print('dthetadN: \t',self.dthetadN)
+    print('N0: \t\t',self.N0)
+    print('D0: \t\t',self.D0)
+    print('L: \t\t',self.L)
+    print('Delta: \t\t',self.Delta)
+    print('lxhxw: \t\t',self.length,'x',self.height,'x',self.width)
+
 
 class KID_sim():
-  def __init__(self,params,dt_init,dx_or_fraction,dt_max=1,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False,dt_interp=0.01):
+  def __init__(self,params,dt_init,dx_or_fraction,dt_max=10,simtime_approx=100,method='CrankNicolson',adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False,dt_interp=0.01):
     #copy physical parameters from params object
     self.lambda_ph = params.lambda_ph
     self.sigma_IC = params.sigma_IC
@@ -210,6 +224,7 @@ class KID_sim():
     self.Qintime[0] = self.Qintime[0]*self.Nqp_init/self.integrate(self.Qintime[0],dx)
     self.Nqpintime = [self.integrate(self.Qintime[0],dx)]
     self.dxlist = [dx]
+    self.x_centers_list = [x_centers]
 
     # calc thermal density of quasiparticles
     Teff_thermal = self.nqp_to_T(self.Q0,self.N0,self.Delta,self.height,self.width)
@@ -233,7 +248,7 @@ class KID_sim():
 
         # update diffusion
         if D_const:
-          D=Dfinal
+          D=self.D0
         else:
           Teff_x = self.nqp_to_T(Qprev+self.Q0,self.N0,self.Delta,self.height,self.width)
           D = self.calc_D(self.D0,Teff_x,self.Delta,x_borders,x_centers)
@@ -243,6 +258,7 @@ class KID_sim():
         self.dtlist.append(dt)
         self.Qintime.append(self.step(dt,dx,D,self.L,self.K,Qprev))
         self.Nqpintime.append(self.integrate(self.Qintime[i+1],dx))
+        self.x_centers_list.append(x_centers)
 
         pbar.update(dt)
         x_centersprev = x_centers
