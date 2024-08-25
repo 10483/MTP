@@ -19,7 +19,7 @@ class fixed_values:
     self.time_au=2.418884e-11 #us
     self.length_au=5.291772e-5 #um
     self.N0_bTa = 30.3e9 #eV-1 um-3
-    self.D0_bTa = 50 #um2 us-1
+    self.D0_bTa = 75 #um2 us-1
     self.N0_Al = 17.2e9 #eV-1 um-3
     self.D0_Al = 15000 #um2 us-1
 consts = fixed_values()
