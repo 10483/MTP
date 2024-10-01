@@ -2,7 +2,6 @@ import numpy as np
 from scipy.optimize import fsolve
 from scipy.special import lambertw
 from scipy.integrate import quad
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 import os
 import re
@@ -211,11 +210,12 @@ class KID_sim():
     # initialize state variables
     if self.params.trickle_time: # if using forcing term instead of simple IC
       self.Qintime = [np.zeros_like(self.x_centers)] # set IC to zero
+      print('Warning! When using a trickle_time, sigma_IC must be small enough compared to absorber length. Otherwise qps are \'lost\' outside the borders of the domain.')
     else:
       self.Qintime = [np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)*self.Nqp_init/(self.params.sigma_IC*np.sqrt(2*np.pi))] # set IC to Nqp_init
       print(self.integrate(self.Qintime[0],dx),'=',self.Nqp_init,'?') #check if integral matches Nqp_init
-      #self.Qintime[0] = self.Qintime[0]*self.Nqp_init/self.integrate(self.Qintime[0],dx) # correct total Nqp for numerical errors
-      #print(self.integrate(self.Qintime[0],dx))
+      self.Qintime[0] = self.Qintime[0]*self.Nqp_init/self.integrate(self.Qintime[0],dx) # correct total Nqp if boundary clips off tails due to large sigma
+      print(self.integrate(self.Qintime[0],dx))
     self.Nqpintime = [self.integrate(self.Qintime[0],dx)] # calculate integral of density, store in new list
 
     # calc thermal density of quasiparticles
@@ -226,54 +226,57 @@ class KID_sim():
     i=0 # keeps track of simulation step
     self.t_elapsed=0 # keeps track of elapsed time (us)
     t_elapsed_D=0 # keeps track of elapsed time but specifically for adapting dx with time
-    dxAdaptPause=False    #
+    dxAdaptPause=False           #
     if self.params.trickle_time: # pause adaptive dx as long as the forcing term is still large
-      dxAdaptPause=True   #
-    with tqdm(total=simtime_approx+2, bar_format='{l_bar}{bar}| time (us): {n_fmt}') as pbar:
-      while True: # kind of a do-while loop
-        if (self.t_elapsed>8*self.params.trickle_time) and dxAdaptPause: # after 8*tau the exponential nature of the forcing term is considered negigible
-          dxAdaptPause=False
+      dxAdaptPause=True          #
+    
+    while True: # kind of a do-while loop
+      if (self.t_elapsed>3*self.params.trickle_time) and dxAdaptPause: # the integral from 0 to 3*tau already contains >95% of the surface under the exponential.
+        dxAdaptPause=False
 
-        # handle adaptive dx
-        if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]) and (dxAdaptPause==False):
-          sqrtMSD = np.sqrt(2*Dfinal*t_elapsed_D)+self.params.sigma_IC #mean squared distance expected from diffusion only (after forcing is negligible)
-          dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
-          self.set_geometry(dx,self.params.length)
-          Qprev = np.interp(self.x_centers,x_centersprev,self.Qintime[i])
-          Qprev *= self.integrate(self.Qintime[i],self.dxlist[i])/self.integrate(Qprev,dx)
-          t_elapsed_D+=dt
-        else:
-          Qprev = self.Qintime[i]
+      # handle adaptive dx
+      if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]) and (dxAdaptPause==False):
+        sqrtMSD = np.sqrt(2*Dfinal*t_elapsed_D)+self.params.sigma_IC #mean squared distance expected from diffusion only (after forcing is negligible)
+        dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
+        self.set_geometry(dx,self.params.length)
+        Qprev = np.interp(self.x_centers,x_centersprev,self.Qintime[i])
+        Qprev *= self.integrate(self.Qintime[i],self.dxlist[i])/self.integrate(Qprev,dx)
+        t_elapsed_D+=dt
+      else:
+        Qprev = self.Qintime[i]
 
-        # update diffusion
-        if D_const:
-          D=self.params.D0
-        else:
-          Teff_x = self.nqp_to_T(Qprev+self.params.Q0,self.params.N0,self.params.Delta,self.params.height,self.params.width)
-          D = self.calc_D(self.params.D0,Teff_x,self.params.Delta)
+      # update diffusion
+      if D_const:
+        D=self.params.D0
+      else:
+        Teff_x = self.nqp_to_T(Qprev+self.params.Q0,self.params.N0,self.params.Delta,self.params.height,self.params.width)
+        D = self.calc_D(self.params.D0,Teff_x,self.params.Delta)
 
-        # do simulation step
-        self.dxlist.append(dx)
-        self.dtlist.append(dt)
-        self.Qintime.append(self.CN_step(dt,dx,D,self.params.L,self.K,Qprev))
-        self.Nqpintime.append(self.integrate(self.Qintime[i+1],dx))
-        self.x_centers_list.append(self.x_centers)
+      # do simulation step
+      self.dxlist.append(dx)
+      self.dtlist.append(dt)
+      self.Qintime.append(self.CN_step(dt,dx,D,self.params.L,self.K,Qprev))
+      self.Nqpintime.append(self.integrate(self.Qintime[i+1],dx))
+      self.x_centers_list.append(self.x_centers)
 
-        pbar.update(dt)
-        x_centersprev = self.x_centers
-        self.t_elapsed+=dt
-        self.t_axis.append(self.t_elapsed)
-        if self.t_elapsed>simtime_approx:
-          break
-        
-        # handle adaptive dt
-        if self.adaptivedt and (dt<=dt_max):
-          dN = np.abs(self.Nqpintime[i]-self.Nqpintime[i+1])
-          if i==0:
-            dNdt = dN*dt
-          if dN != 0:
-            dt = (dNdt/dN+dt)/2 # taking this mean stabilizes oscillations due to trickle and adaptive dt both depending on dt value.
-        i+=1
+      x_centersprev = self.x_centers
+      self.t_elapsed+=dt
+      self.t_axis.append(self.t_elapsed)
+      print(f'\rIteration: {i}\tSimtime (us): {self.t_elapsed}', end='')
+      if self.t_elapsed>simtime_approx:
+        break
+      
+      # handle adaptive dt
+      if self.adaptivedt and (dt<=dt_max):
+        dN = np.abs(self.Nqpintime[i]-self.Nqpintime[i+1])
+        if i==0:
+          dNdt = dN*dt
+        if dN != 0:
+          dt = (dNdt/dN+dt)/2 # taking this mean stabilizes oscillations due to trickle and adaptive dt both depending on dt value.
+          if dt<dt_init: # constrain how small dt can become.
+            dt=dt_init
+      i+=1
+    print()
 
     self.t_axis = np.array(self.t_axis)
     self.Nqpintime=np.array(self.Nqpintime)
@@ -336,6 +339,6 @@ class KID_sim():
   def ringing(self,t_axis,phaseintime,tau_ringing):
     lenT = len(t_axis)
     padded = np.pad(phaseintime,(lenT,lenT),constant_values=(0,0))
-    convring = np.exp(-t_axis/tau_ringing)/tau_ringing
-    #convring /= np.sum(convring)
+    convring = np.exp(-t_axis/tau_ringing)
+    convring /= np.sum(convring)
     return np.convolve(padded,convring,'valid')[:lenT]
