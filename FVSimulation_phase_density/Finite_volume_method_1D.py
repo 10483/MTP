@@ -171,7 +171,7 @@ class KID_params():
 
 
 class KID_sim():
-  def __init__(self,params,dt_init,dx_or_fraction,dt_max=10,simtime_approx=100,adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False,dt_interp=0.01):
+  def __init__(self,params,dt_init,dx_or_fraction,dt_max=10,simtime_approx=100,adaptivedx=True,adaptivedt=True,usesymmetry=True,D_const=False,ringingdtinterp=0.001,approx2D=False): # 2D option is sketchy, don't trust without more checking. If loading after a sim is too slow or requires too much space, increase ringingdtinterp.
     #copy physical parameters from params object
     self.params=params
 
@@ -210,12 +210,10 @@ class KID_sim():
     # initialize state variables
     if self.params.trickle_time: # if using forcing term instead of simple IC
       self.Qintime = [np.zeros_like(self.x_centers)] # set IC to zero
-      print('Warning! When using a trickle_time, sigma_IC must be small enough compared to absorber length. Otherwise qps are \'lost\' outside the borders of the domain.')
     else:
       self.Qintime = [np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)*self.Nqp_init/(self.params.sigma_IC*np.sqrt(2*np.pi))] # set IC to Nqp_init
-      print(self.integrate(self.Qintime[0],dx),'=',self.Nqp_init,'?') #check if integral matches Nqp_init
       self.Qintime[0] = self.Qintime[0]*self.Nqp_init/self.integrate(self.Qintime[0],dx) # correct total Nqp if boundary clips off tails due to large sigma
-      print(self.integrate(self.Qintime[0],dx))
+
     self.Nqpintime = [self.integrate(self.Qintime[0],dx)] # calculate integral of density, store in new list
 
     # calc thermal density of quasiparticles
@@ -226,9 +224,11 @@ class KID_sim():
     i=0 # keeps track of simulation step
     self.t_elapsed=0 # keeps track of elapsed time (us)
     t_elapsed_D=0 # keeps track of elapsed time but specifically for adapting dx with time
-    dxAdaptPause=False           #
+    sqrtMSD2D=self.params.sigma_IC
     if self.params.trickle_time: # pause adaptive dx as long as the forcing term is still large
-      dxAdaptPause=True          #
+      dxAdaptPause=True
+    else:
+      dxAdaptPause=False
     
     while True: # kind of a do-while loop
       if (self.t_elapsed>3*self.params.trickle_time) and dxAdaptPause: # the integral from 0 to 3*tau already contains >95% of the surface under the exponential.
@@ -251,6 +251,10 @@ class KID_sim():
       else:
         Teff_x = self.nqp_to_T(Qprev+self.params.Q0,self.params.N0,self.params.Delta,self.params.height,self.params.width)
         D = self.calc_D(self.params.D0,Teff_x,self.params.Delta)
+      # 2D approximation
+      sqrtMSD2D += 4*self.params.D0*dt
+      if approx2D and (sqrtMSD2D<params.width/2):
+        D=8*D**2*(self.t_elapsed+dt)
 
       # do simulation step
       self.dxlist.append(dx)
@@ -273,19 +277,23 @@ class KID_sim():
           dNdt = dN*dt
         if dN != 0:
           dt = (dNdt/dN+dt)/2 # taking this mean stabilizes oscillations due to trickle and adaptive dt both depending on dt value.
-          if dt<dt_init: # constrain how small dt can become.
-            dt=dt_init
       i+=1
     print()
 
     self.t_axis = np.array(self.t_axis)
     self.Nqpintime=np.array(self.Nqpintime)
 
-    self.t_axis_interp = np.arange(0,self.t_axis[-1],dt_interp)
-    Nqp_interp = np.interp(self.t_axis_interp,self.t_axis,self.Nqpintime)
-    self.phaseintime = self.ringing(self.t_axis_interp,Nqp_interp,self.params.tau_ringing)*self.params.dthetadN
-    self.t_start = -self.t_axis_interp[np.argmax(self.phaseintime)]
-    self.t_axis_interp += self.t_start
+    if ringingdtinterp:
+      self.t_axis_interp = np.arange(0,self.t_axis[-1],ringingdtinterp)
+      Nqp_interp = np.interp(self.t_axis_interp,self.t_axis,self.Nqpintime)
+      self.phaseintime = self.ringing(self.t_axis_interp,Nqp_interp,self.params.tau_ringing)*self.params.dthetadN
+      self.t_start = -self.t_axis_interp[np.argmax(self.phaseintime)]
+      self.t_axis_interp += self.t_start
+    else:
+      self.t_axis_interp = self.t_axis
+      self.phaseintime = self.Nqpintime*self.params.dthetadN
+      self.t_start = -self.t_axis_interp[np.argmax(self.phaseintime)]
+      self.t_axis_interp += self.t_start
 
   def set_geometry(self,dx,length):
     if self.usesymmetry:
@@ -309,13 +317,18 @@ class KID_sim():
     gradient = D*np.diff(Q_temp)/dx
     return (-gradient[:-1]+gradient[1:])/dx
   
-  def source(self,dt):
-    S_next = (self.Nqp_init/self.params.trickle_time)*np.exp(-(self.t_elapsed+dt)/self.params.trickle_time)*np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)/(self.params.sigma_IC*np.sqrt(2*np.pi))
+  def source(self,dt,dx):
+    S_next = np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)/(self.params.sigma_IC*np.sqrt(2*np.pi))
     S_prev = (self.Nqp_init/self.params.trickle_time)*np.exp(-(self.t_elapsed)/self.params.trickle_time)*np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)/(self.params.sigma_IC*np.sqrt(2*np.pi))
+    integ_next = self.integrate(S_next,dx)
+    integ_prev = self.integrate(S_prev,dx)
+    if (integ_next > 1e-6) and (integ_prev > 1e-6):
+      S_next = S_next*(self.Nqp_init/self.params.trickle_time)*np.exp(-(self.t_elapsed+dt)/self.params.trickle_time)/integ_next
+      S_prev = S_prev*(self.Nqp_init/self.params.trickle_time)*np.exp(-(self.t_elapsed)/self.params.trickle_time)/integ_prev
     return S_next,S_prev
   
   def CN_eqs_source(self,dt,dx,D,L,K,Q_prev,Q_next):
-    S_next,S_prev = self.source(dt)
+    S_next,S_prev = self.source(dt,dx)
     return Q_prev - Q_next + 0.5*dt*(self.diffuse(dx,D,Q_next) - K*Q_next**2 - L*Q_next + S_next +
                                      self.diffuse(dx,D,Q_prev) - K*Q_prev**2 - L*Q_prev + S_prev)
   
@@ -325,9 +338,9 @@ class KID_sim():
   
   def CN_step(self,dt,dx,D,L,K,Q_prev):
     if self.params.trickle_time: # if we have a source term:
-      return fsolve(lambda Q_next : self.CN_eqs_source(dt,dx,D,L,K,Q_prev,Q_next), Q_prev)
+      return fsolve(lambda Q_next : self.CN_eqs_source(dt,dx,D,L,K,Q_prev,Q_next), Q_prev/2)
     else:
-      return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,L,K,Q_prev,Q_next), Q_prev)
+      return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,L,K,Q_prev,Q_next), Q_prev/2)
 
   def integrate(self,Q,dx):
     if self.usesymmetry:
