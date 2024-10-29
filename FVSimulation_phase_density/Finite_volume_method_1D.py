@@ -232,29 +232,29 @@ class KID_sim():
     
     while True: # kind of a do-while loop
       if (self.t_elapsed>3*self.params.trickle_time) and dxAdaptPause: # the integral from 0 to 3*tau already contains >95% of the surface under the exponential.
-        dxAdaptPause=False
+        dxAdaptPause=False # resume the adaptive dx optimization
 
       # handle adaptive dx
       if self.adaptivedx and (i!=0) and (dx!=valid_dx_list[-1]) and (dxAdaptPause==False):
         sqrtMSD = np.sqrt(2*Dfinal*t_elapsed_D)+self.params.sigma_IC #mean squared distance expected from diffusion only (after forcing is negligible)
-        dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1]
-        self.set_geometry(dx,self.params.length)
-        Qprev = np.interp(self.x_centers,x_centersprev,self.Qintime[i])
-        Qprev *= self.integrate(self.Qintime[i],self.dxlist[i])/self.integrate(Qprev,dx)
-        t_elapsed_D+=dt
+        dx = valid_dx_list[valid_dx_list <= sqrtMSD*dx_or_fraction][-1] #update to the largest allowed dx value below the requested fraction of mean distance
+        self.set_geometry(dx,self.params.length) # calculate new geometry of simulation
+        Qprev = np.interp(self.x_centers,x_centersprev,self.Qintime[i]) # update the qp distribution to new geometry
+        Qprev *= self.integrate(self.Qintime[i],self.dxlist[i])/self.integrate(Qprev,dx) # correct for any potential loss of total Nqp by normalizing
+        t_elapsed_D+=dt # update elapsed diffusion time
       else:
         Qprev = self.Qintime[i]
 
       # update diffusion
       if D_const:
         D=self.params.D0
-      else:
+      else: # calculate local effective temperature
         Teff_x = self.nqp_to_T(Qprev+self.params.Q0,self.params.N0,self.params.Delta,self.params.height,self.params.width)
-        D = self.calc_D(self.params.D0,Teff_x,self.params.Delta)
+        D = self.calc_D(self.params.D0,Teff_x,self.params.Delta) # calculate new location dependent diffusion
       # 2D approximation
       sqrtMSD2D += 4*self.params.D0*dt
       if approx2D and (sqrtMSD2D<params.width/2):
-        D=8*D**2*(self.t_elapsed+dt)
+        D=8*D**2*(self.t_elapsed+dt) # use higher diffusion rate to simulate 2D diffusion if required
 
       # do simulation step
       self.dxlist.append(dx)
@@ -263,61 +263,62 @@ class KID_sim():
       self.Nqpintime.append(self.integrate(self.Qintime[i+1],dx))
       self.x_centers_list.append(self.x_centers)
 
-      x_centersprev = self.x_centers
+      x_centersprev = self.x_centers 
       self.t_elapsed+=dt
       self.t_axis.append(self.t_elapsed)
-      print(f'\rIteration: {i}\tSimtime (us): {self.t_elapsed}', end='')
-      if self.t_elapsed>simtime_approx:
+      print(f'\rIteration: {i}\tSimtime (us): {self.t_elapsed}', end='') # print and update progress counter
+
+      if self.t_elapsed>simtime_approx: # check whether simulation has reached required time
         break
       
       # handle adaptive dt
       if self.adaptivedt and (dt<=dt_max):
-        dN = np.abs(self.Nqpintime[i]-self.Nqpintime[i+1])
+        dN = np.abs(self.Nqpintime[i]-self.Nqpintime[i+1]) # calculate difference in Nqp from previous step.
         if i==0:
-          dNdt = dN*dt
+          dNdt = dN*dt # set at beginning of simulation
         if dN != 0:
-          dt = (dNdt/dN+dt)/2 # taking this mean stabilizes oscillations due to trickle and adaptive dt both depending on dt value.
+          dt = (dNdt/dN+dt)/2 # update dt, taking the mean stabilizes oscillations due to trickle and adaptive dt both depending on dt value.
       i+=1
     print()
 
-    self.t_axis = np.array(self.t_axis)
-    self.Nqpintime=np.array(self.Nqpintime)
+    self.t_axis = np.array(self.t_axis) # save time array
+    self.Nqpintime=np.array(self.Nqpintime) # and data array
 
-    if ringingdtinterp:
+    if ringingdtinterp: # if desired: convolve with ringing with interpolation of dt = ringingdtinterp
       self.t_axis_interp = np.arange(0,self.t_axis[-1],ringingdtinterp)
       Nqp_interp = np.interp(self.t_axis_interp,self.t_axis,self.Nqpintime)
       self.phaseintime = self.ringing(self.t_axis_interp,Nqp_interp,self.params.tau_ringing)*self.params.dthetadN
       self.t_start = -self.t_axis_interp[np.argmax(self.phaseintime)]
-      self.t_axis_interp += self.t_start
-    else:
+      self.t_axis_interp += self.t_start # align maximum to t=0
+    else: # otherwise simply multiply Nqp with responsivity
       self.t_axis_interp = self.t_axis
       self.phaseintime = self.Nqpintime*self.params.dthetadN
       self.t_start = -self.t_axis_interp[np.argmax(self.phaseintime)]
-      self.t_axis_interp += self.t_start
+      self.t_axis_interp += self.t_start # align maximum to t=0
 
   def set_geometry(self,dx,length):
-    if self.usesymmetry:
-      self.x_borders=np.arange(0,length/2+dx/2,dx)
+    if self.usesymmetry: # set geometry for half the MKID
+      self.x_borders=np.arange(0,length/2+dx/2,dx) 
       self.x_centers=np.arange(dx/2,length/2,dx)
-    else:
+    else: # set geometry for a full MKID
       self.x_borders=np.arange(-length/2,length/2+dx/2,dx)
       self.x_centers=np.arange(-length/2+dx/2,length/2,dx)
     return
   
-  def nqp_to_T(self,nqp,N0,Delta,height,width):
+  def nqp_to_T(self,nqp,N0,Delta,height,width): # inverts n_qp(T)
     a = 2*N0*height*width*np.sqrt(2*np.pi*consts.k_B*Delta)
     b = Delta/consts.k_B
     return np.real(2*b/lambertw(2*a**2*b/(nqp**2)))
   
-  def calc_D(self,D0,Teff_x,Delta):
+  def calc_D(self,D0,Teff_x,Delta): # calculates energy dependent D at elements, interpolates to borders
     return np.interp(self.x_borders,self.x_centers,D0*np.sqrt(2*consts.k_B*Teff_x/(np.pi*Delta)))
   
-  def diffuse(self,dx,D,Q_prev):
+  def diffuse(self,dx,D,Q_prev): # apply diffusion
     Q_temp = np.pad(Q_prev,(1,1),'edge') #Assumes von Neumann BCs, for Dirichlet use np.pad(Q_prev,(1,1),'constant', constant_values=(0, 0)), disable 'usesymmetry' for this
     gradient = D*np.diff(Q_temp)/dx
     return (-gradient[:-1]+gradient[1:])/dx
   
-  def source(self,dt,dx):
+  def source(self,dt,dx): # apply quadratically decaying source term
     S_next = np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)/(self.params.sigma_IC*np.sqrt(2*np.pi))
     S_prev = (self.Nqp_init/self.params.trickle_time)*np.exp(-(self.t_elapsed)/self.params.trickle_time)*np.exp(-0.5*(self.x_centers/self.params.sigma_IC)**2)/(self.params.sigma_IC*np.sqrt(2*np.pi))
     integ_next = self.integrate(S_next,dx)
@@ -327,29 +328,29 @@ class KID_sim():
       S_prev = S_prev*(self.Nqp_init/self.params.trickle_time)*np.exp(-(self.t_elapsed)/self.params.trickle_time)/integ_prev
     return S_next,S_prev
   
-  def CN_eqs_source(self,dt,dx,D,L,K,Q_prev,Q_next):
+  def CN_eqs_source(self,dt,dx,D,L,K,Q_prev,Q_next): # the Crank-Nicolson update equations in case of a source term
     S_next,S_prev = self.source(dt,dx)
     return Q_prev - Q_next + 0.5*dt*(self.diffuse(dx,D,Q_next) - K*Q_next**2 - L*Q_next + S_next +
                                      self.diffuse(dx,D,Q_prev) - K*Q_prev**2 - L*Q_prev + S_prev)
   
-  def CN_eqs(self,dt,dx,D,L,K,Q_prev,Q_next):
+  def CN_eqs(self,dt,dx,D,L,K,Q_prev,Q_next): # the Crank-Nicolson update equations without source term
     return Q_prev - Q_next + 0.5*dt*(self.diffuse(dx,D,Q_next) - K*Q_next**2 - L*Q_next +
                                      self.diffuse(dx,D,Q_prev) - K*Q_prev**2 - L*Q_prev)
   
-  def CN_step(self,dt,dx,D,L,K,Q_prev):
+  def CN_step(self,dt,dx,D,L,K,Q_prev): # fsolve the CN equations, with the previous step/2 as initial guess
     if self.params.trickle_time: # if we have a source term:
       return fsolve(lambda Q_next : self.CN_eqs_source(dt,dx,D,L,K,Q_prev,Q_next), Q_prev/2)
     else:
       return fsolve(lambda Q_next : self.CN_eqs(dt,dx,D,L,K,Q_prev,Q_next), Q_prev/2)
 
-  def integrate(self,Q,dx):
+  def integrate(self,Q,dx): # integrate nqp to find Nqp
     if self.usesymmetry:
       Nqp = np.sum(Q,axis=-1)*dx*2
     else:
       Nqp = np.sum(Q,axis=-1)*dx
     return Nqp
   
-  def ringing(self,t_axis,phaseintime,tau_ringing):
+  def ringing(self,t_axis,phaseintime,tau_ringing): # convolve signal with ringing time to obtain phase response.
     lenT = len(t_axis)
     padded = np.pad(phaseintime,(lenT,lenT),constant_values=(0,0))
     convring = np.exp(-t_axis/tau_ringing)
